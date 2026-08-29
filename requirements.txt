@@ -1,0 +1,2 @@
+# No third-party Python dependencies are required by the current C++/pthreads implementation.
+# Future plotting/analysis scripts can add their dependencies here.

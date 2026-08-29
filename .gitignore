@@ -1,0 +1,37 @@
+# C/C++ build artifacts
+*.o
+*.obj
+*.a
+*.so
+*.dll
+*.exe
+*.out
+build/
+bin/
+Debug/
+Release/
+
+# Generated benchmark outputs
+kmeans_time_results*.csv
+silhouette_scores*.csv
+*.generated.csv
+*.generated.png
+
+# Python cache (if analysis scripts are added later)
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# IDE/editor
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Office temporary files
+~$*
