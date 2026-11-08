@@ -35,3 +35,10 @@ desktop.ini
 
 # Office temporary files
 ~$*
+
+# Build and results directories
+build*/
+results/
+audit/
+__pycache__/
+*.o

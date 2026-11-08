@@ -1,0 +1,180 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+# v1.0 had no CI at all, which is how a build that cannot compile on MSVC,
+# a kernel that silently stopped vectorising, and a timer measuring the
+# wrong thing all survived. Each job below exists to catch one of the
+# defects recorded in BUGS.md.
+
+jobs:
+  build-and-test:
+    name: ${{ matrix.os }} / ${{ matrix.compiler }} / ${{ matrix.build_type }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        build_type: [Debug, RelWithDebInfo]
+        include:
+          - os: ubuntu-latest
+            compiler: gcc
+          - os: macos-latest
+            compiler: appleclang
+          - os: windows-latest
+            compiler: msvc
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        # -Werror everywhere. The original had variable-length arrays and a
+        # sign-compare warning; VLAs are a GCC extension that MSVC rejects
+        # outright, which is why that code never built on Windows.
+        run: >
+          cmake -S . -B build
+          -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
+          -DKMEANS_WERROR=ON
+          -DKMEANS_ENABLE_MPI=OFF
+
+      - name: Build
+        run: cmake --build build --config ${{ matrix.build_type }} --parallel
+
+      - name: Test
+        run: ctest --test-dir build --build-config ${{ matrix.build_type }} --output-on-failure
+
+      - name: Report the build that was tested
+        # Every binary prints its own compiler and flags. A measurement
+        # without its build is not a measurement - see BUGS.md section 1.
+        run: ./build/kmeans --version
+        if: runner.os != 'Windows'
+
+  clang:
+    name: ubuntu / clang
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: >
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          -DCMAKE_CXX_COMPILER=clang++ -DKMEANS_WERROR=ON -DKMEANS_ENABLE_MPI=OFF
+      - run: cmake --build build --parallel
+      - run: ctest --test-dir build --output-on-failure
+
+  sanitizers:
+    name: ${{ matrix.sanitizer }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - sanitizer: address,undefined
+            openmp: "ON"
+          - sanitizer: thread
+            # OpenMP off for ThreadSanitizer. GCC's libgomp is not built
+            # with TSan instrumentation, so TSan cannot see the implicit
+            # barrier at the end of an `omp parallel for` and reports every
+            # reduction as a race. Those are false positives; disabling
+            # OpenMP leaves the pthread pool, whose barriers TSan does
+            # understand, and that is the code worth checking anyway.
+            openmp: "OFF"
+    steps:
+      - uses: actions/checkout@v4
+      - run: >
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          -DKMEANS_ENABLE_MPI=OFF
+          -DKMEANS_ENABLE_OPENMP=${{ matrix.openmp }}
+          -DCMAKE_CXX_FLAGS="-fsanitize=${{ matrix.sanitizer }} -fno-omit-frame-pointer -g"
+      - run: cmake --build build --parallel
+      - run: ctest --test-dir build --output-on-failure
+        env:
+          # Any report fails the job rather than being buried in the log.
+          ASAN_OPTIONS: halt_on_error=1
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+          TSAN_OPTIONS: halt_on_error=1
+
+  mpi:
+    name: mpi
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install MPICH
+        run: sudo apt-get update && sudo apt-get install -y mpich
+      - run: >
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo -DKMEANS_WERROR=ON
+      - run: cmake --build build --parallel
+      - name: Distributed result must match the serial one bitwise
+        # Not "within a tolerance": the block decomposition means each cell
+        # is summed from one real value and p-1 exact zeros, so equality is
+        # exact and anything less would hide a real divergence.
+        run: |
+          for ranks in 1 2 3 4; do
+            echo "--- $ranks ranks ---"
+            mpiexec -n $ranks ./build/kmeans_mpi --self-check
+          done
+
+  vectorisation:
+    name: vectorisation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: The distance kernel must still vectorise
+        # Roughly 95% of the runtime is in one loop. A change that defeats
+        # the vectoriser - a call, an unflattenable branch, a pointer the
+        # compiler must assume aliases - halves throughput silently, so it
+        # breaks the build instead.
+        run: ./scripts/check_vectorisation.sh
+
+  static-analysis:
+    name: static analysis
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck
+        run: shellcheck scripts/*.sh
+      - name: Python syntax and style
+        run: |
+          python3 -m py_compile scripts/plot_results.py
+          pip install --quiet matplotlib
+          python3 -c "import ast,sys; ast.parse(open('scripts/plot_results.py').read())"
+
+  audit:
+    name: audit reproduces
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the current code, so the seeding comparison has both sides
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DKMEANS_ENABLE_MPI=OFF
+          cmake --build build --parallel
+      - name: Reproduce the v1.0 findings from the committed legacy sources
+        # The claims in BUGS.md are regenerated from legacy/ on every push,
+        # so they cannot rot into folklore.
+        run: ./scripts/reproduce_audit.sh audit
+      - name: Every legacy silhouette score must still be exactly 1
+        run: |
+          distinct=$(tail -n +2 audit/legacy_silhouette.csv | cut -d, -f4 | sort -u | wc -l)
+          echo "distinct silhouette values in the v1.0 output: $distinct"
+          test "$distinct" -eq 1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: audit
+          path: audit/
+
+  pipeline:
+    name: end-to-end pipeline
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: pip install --quiet -r requirements.txt
+      - name: Configure, build, test, measure, plot
+        # The whole of README.md's results section, regenerated. v1.0's
+        # tables were produced by editing constants by hand and pasting the
+        # output into a spreadsheet; this is the replacement for that.
+        run: ./scripts/run_experiments.sh --quick
+      - uses: actions/upload-artifact@v4
+        with:
+          name: results
+          path: |
+            results/
+            graphs/

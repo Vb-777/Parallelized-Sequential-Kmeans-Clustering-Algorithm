@@ -1,2 +1,9 @@
-# No third-party Python dependencies are required by the current C++/pthreads implementation.
-# Future plotting/analysis scripts can add their dependencies here.
+# Plotting only. The C++ programs have no Python dependency; these are for
+# scripts/plot_results.py, which turns the benchmark's per-run CSV into the
+# charts in graphs/.
+#
+# v1.0's requirements.txt said "No third-party Python dependencies are
+# required", and there was no .py file in the repository - the CV's "Python
+# (Matplotlib)" described a spreadsheet. This is the script that makes the
+# claim true.
+matplotlib>=3.7
